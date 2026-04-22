@@ -1,0 +1,173 @@
+name: "ProofAnchor — Timestamp Release"
+description: "Anchor a SHA-256 hash of your release artifact to the Polygon blockchain via ProofAnchor. Immutable, verifiable, permanent."
+author: "Craig Solomon / Fulcrum Enterprises LLC"
+
+branding:
+  icon: "shield"
+  color: "purple"
+
+inputs:
+  api-key:
+    description: "ProofAnchor API key (starts with pa_). Get one at https://proofanchor.com/settings"
+    required: true
+  file:
+    description: "Path to the file to timestamp (e.g. dist/app.zip). Mutually exclusive with 'hash'."
+    required: false
+  hash:
+    description: "Pre-computed SHA-256 hash to anchor. Mutually exclusive with 'file'."
+    required: false
+  title:
+    description: "Title for the proof (defaults to filename or 'Release <tag>')"
+    required: false
+  description:
+    description: "Description for the proof"
+    required: false
+  api-url:
+    description: "ProofAnchor API base URL (override for self-hosted or staging)"
+    required: false
+    default: "https://proofanchor.com"
+  add-to-release:
+    description: "Add proof details to the GitHub release body (true/false)"
+    required: false
+    default: "true"
+
+outputs:
+  proof-id:
+    description: "Public ID of the anchored proof"
+    value: ${{ steps.anchor.outputs.proof-id }}
+  hash:
+    description: "SHA-256 hash that was anchored"
+    value: ${{ steps.anchor.outputs.hash }}
+  verify-url:
+    description: "Public verification URL"
+    value: ${{ steps.anchor.outputs.verify-url }}
+  status:
+    description: "Proof status (pending, anchored, failed)"
+    value: ${{ steps.anchor.outputs.status }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Compute or validate hash
+      id: hash
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.file }}" ] && [ -n "${{ inputs.hash }}" ]; then
+          echo "::error::Specify either 'file' or 'hash', not both."
+          exit 1
+        fi
+
+        if [ -z "${{ inputs.file }}" ] && [ -z "${{ inputs.hash }}" ]; then
+          echo "::error::You must specify either 'file' or 'hash'."
+          exit 1
+        fi
+
+        if [ -n "${{ inputs.file }}" ]; then
+          if [ ! -f "${{ inputs.file }}" ]; then
+            echo "::error::File not found: ${{ inputs.file }}"
+            exit 1
+          fi
+          HASH=$(sha256sum "${{ inputs.file }}" | awk '{print $1}')
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Computed SHA-256: $HASH"
+        else
+          HASH="${{ inputs.hash }}"
+          if ! echo "$HASH" | grep -qE '^[a-fA-F0-9]{64}$'; then
+            echo "::error::Invalid SHA-256 hash format: $HASH"
+            exit 1
+          fi
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Using provided SHA-256: $HASH"
+        fi
+
+    - name: Determine title
+      id: title
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.title }}" ]; then
+          echo "title=${{ inputs.title }}" >> "$GITHUB_OUTPUT"
+        elif [ -n "${{ inputs.file }}" ]; then
+          echo "title=$(basename '${{ inputs.file }}')" >> "$GITHUB_OUTPUT"
+        elif [ -n "$GITHUB_REF_NAME" ]; then
+          echo "title=Release $GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+        else
+          echo "title=GitHub Action proof" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Anchor proof via ProofAnchor API
+      id: anchor
+      shell: bash
+      env:
+        PA_API_KEY: ${{ inputs.api-key }}
+        PA_API_URL: ${{ inputs.api-url }}
+        PA_HASH: ${{ steps.hash.outputs.hash }}
+        PA_TITLE: ${{ steps.title.outputs.title }}
+        PA_DESC: ${{ inputs.description }}
+      run: |
+        BODY=$(jq -n \
+          --arg hash "$PA_HASH" \
+          --arg title "$PA_TITLE" \
+          --arg desc "$PA_DESC" \
+          '{sha256: $hash, title: $title, description: $desc}')
+
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -X POST "${PA_API_URL}/api/v1/proofs" \
+          -H "Authorization: Bearer ${PA_API_KEY}" \
+          -H "Content-Type: application/json" \
+          -d "$BODY")
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | sed '$d')
+
+        if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+          echo "::error::ProofAnchor API returned HTTP $HTTP_CODE: $BODY"
+          exit 1
+        fi
+
+        PROOF_ID=$(echo "$BODY" | jq -r '.publicId // .id // empty')
+        STATUS=$(echo "$BODY" | jq -r '.status // "pending"')
+        VERIFY_URL="${PA_API_URL}/verify/${PROOF_ID}"
+
+        echo "proof-id=$PROOF_ID" >> "$GITHUB_OUTPUT"
+        echo "hash=$PA_HASH" >> "$GITHUB_OUTPUT"
+        echo "verify-url=$VERIFY_URL" >> "$GITHUB_OUTPUT"
+        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+        echo "### ProofAnchor Timestamp" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+        echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+        echo "| **SHA-256** | \`$PA_HASH\` |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| **Proof ID** | \`$PROOF_ID\` |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| **Status** | $STATUS |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| **Verify** | [proofanchor.com/verify/$PROOF_ID]($VERIFY_URL) |" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Append to release body
+      if: inputs.add-to-release == 'true' && github.event_name == 'release'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERIFY_URL: ${{ steps.anchor.outputs.verify-url }}
+        PA_HASH: ${{ steps.anchor.outputs.hash }}
+        PROOF_ID: ${{ steps.anchor.outputs.proof-id }}
+      run: |
+        CURRENT_BODY=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}" --jq '.body')
+
+        PROOF_BLOCK=$(cat <<BLOCK
+
+        ---
+
+        **Blockchain Timestamp** — [Verify on ProofAnchor](${VERIFY_URL})
+        SHA-256: \`${PA_HASH}\`
+        Proof ID: \`${PROOF_ID}\`
+        BLOCK
+        )
+
+        UPDATED_BODY="${CURRENT_BODY}${PROOF_BLOCK}"
+
+        gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}" \
+          -X PATCH \
+          -f body="$UPDATED_BODY"
+
+        echo "Release body updated with proof details."
