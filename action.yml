@@ -1,14 +1,14 @@
-name: "ProofAnchor — Timestamp Release"
-description: "Anchor a SHA-256 hash of your release artifact to the Polygon blockchain via ProofAnchor. Immutable, verifiable, permanent."
+name: "ProofLedger — Timestamp Release"
+description: "Anchor a SHA-256 hash of your release artifact to the Polygon and Bitcoin blockchains via ProofLedger. Your file never leaves the runner."
 author: "Craig Solomon / Fulcrum Enterprises LLC"
 
 branding:
   icon: "shield"
-  color: "purple"
+  color: "blue"
 
 inputs:
   api-key:
-    description: "ProofAnchor API key (starts with pa_). Get one at https://proofanchor.com/settings"
+    description: "ProofLedger API key (starts with sk_). Issued from Account > API Keys on the BUSINESS plan."
     required: true
   file:
     description: "Path to the file to timestamp (e.g. dist/app.zip). Mutually exclusive with 'hash'."
@@ -16,34 +16,38 @@ inputs:
   hash:
     description: "Pre-computed SHA-256 hash to anchor. Mutually exclusive with 'file'."
     required: false
-  title:
-    description: "Title for the proof (defaults to filename or 'Release <tag>')"
+  filename:
+    description: "Label for the proof, shown in your ProofLedger dashboard. Defaults to the filename or 'Release <tag>'."
     required: false
-  description:
-    description: "Description for the proof"
+  bitcoin:
+    description: "Also queue the proof for Bitcoin anchoring (Merkle-batched daily). Polygon anchoring happens either way."
     required: false
+    default: "false"
   api-url:
-    description: "ProofAnchor API base URL (override for self-hosted or staging)"
+    description: "ProofLedger API base URL (override for staging)."
     required: false
-    default: "https://proofanchor.com"
+    default: "https://proofledger.io"
   add-to-release:
-    description: "Add proof details to the GitHub release body (true/false)"
+    description: "Add proof details to the GitHub release body (true/false)."
     required: false
     default: "true"
 
 outputs:
   proof-id:
-    description: "Public ID of the anchored proof"
+    description: "ProofLedger proof ID"
     value: ${{ steps.anchor.outputs.proof-id }}
   hash:
     description: "SHA-256 hash that was anchored"
     value: ${{ steps.anchor.outputs.hash }}
   verify-url:
-    description: "Public verification URL"
+    description: "Public verification API URL for this hash"
     value: ${{ steps.anchor.outputs.verify-url }}
   status:
-    description: "Proof status (pending, anchored, failed)"
+    description: "Polygon anchoring status (ANCHORED or PENDING)"
     value: ${{ steps.anchor.outputs.status }}
+  evidence-readiness:
+    description: "Evidence readiness reported by ProofLedger (e.g. READY_POLYGON, READY_BITCOIN)"
+    value: ${{ steps.anchor.outputs.evidence-readiness }}
 
 runs:
   using: "composite"
@@ -80,68 +84,86 @@ runs:
           echo "Using provided SHA-256: $HASH"
         fi
 
-    - name: Determine title
-      id: title
+    - name: Determine proof label
+      id: label
       shell: bash
       run: |
-        if [ -n "${{ inputs.title }}" ]; then
-          echo "title=${{ inputs.title }}" >> "$GITHUB_OUTPUT"
+        if [ -n "${{ inputs.filename }}" ]; then
+          echo "filename=${{ inputs.filename }}" >> "$GITHUB_OUTPUT"
         elif [ -n "${{ inputs.file }}" ]; then
-          echo "title=$(basename '${{ inputs.file }}')" >> "$GITHUB_OUTPUT"
+          echo "filename=$(basename '${{ inputs.file }}')" >> "$GITHUB_OUTPUT"
         elif [ -n "$GITHUB_REF_NAME" ]; then
-          echo "title=Release $GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "filename=Release $GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
         else
-          echo "title=GitHub Action proof" >> "$GITHUB_OUTPUT"
+          echo "filename=GitHub Action proof" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Anchor proof via ProofAnchor API
+    - name: Anchor proof via ProofLedger API
       id: anchor
       shell: bash
       env:
-        PA_API_KEY: ${{ inputs.api-key }}
-        PA_API_URL: ${{ inputs.api-url }}
-        PA_HASH: ${{ steps.hash.outputs.hash }}
-        PA_TITLE: ${{ steps.title.outputs.title }}
-        PA_DESC: ${{ inputs.description }}
+        PL_API_KEY: ${{ inputs.api-key }}
+        PL_API_URL: ${{ inputs.api-url }}
+        PL_HASH: ${{ steps.hash.outputs.hash }}
+        PL_FILENAME: ${{ steps.label.outputs.filename }}
+        PL_BITCOIN: ${{ inputs.bitcoin }}
       run: |
+        if [ "$PL_BITCOIN" = "true" ]; then BTC=true; else BTC=false; fi
+
         BODY=$(jq -n \
-          --arg hash "$PA_HASH" \
-          --arg title "$PA_TITLE" \
-          --arg desc "$PA_DESC" \
-          '{sha256: $hash, title: $title, description: $desc}')
+          --arg hash "$PL_HASH" \
+          --arg filename "$PL_FILENAME" \
+          --argjson bitcoin "$BTC" \
+          '{sha256: $hash, filename: $filename, bitcoin_requested: $bitcoin}')
 
         RESPONSE=$(curl -s -w "\n%{http_code}" \
-          -X POST "${PA_API_URL}/api/v1/proofs" \
-          -H "Authorization: Bearer ${PA_API_KEY}" \
+          -X POST "${PL_API_URL}/api/v1/proof" \
+          -H "Authorization: Bearer ${PL_API_KEY}" \
           -H "Content-Type: application/json" \
           -d "$BODY")
 
         HTTP_CODE=$(echo "$RESPONSE" | tail -1)
         BODY=$(echo "$RESPONSE" | sed '$d')
 
-        if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-          echo "::error::ProofAnchor API returned HTTP $HTTP_CODE: $BODY"
+        if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
+          echo "::error::ProofLedger rejected the API key (HTTP $HTTP_CODE). API keys start with sk_ and are issued from Account > API Keys on the BUSINESS plan."
           exit 1
         fi
 
-        PROOF_ID=$(echo "$BODY" | jq -r '.publicId // .id // empty')
-        STATUS=$(echo "$BODY" | jq -r '.status // "pending"')
-        VERIFY_URL="${PA_API_URL}/verify/${PROOF_ID}"
+        if [ "$HTTP_CODE" = "429" ]; then
+          echo "::error::ProofLedger monthly proof limit reached (HTTP 429): $BODY"
+          exit 1
+        fi
+
+        if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+          echo "::error::ProofLedger API returned HTTP $HTTP_CODE: $BODY"
+          exit 1
+        fi
+
+        PROOF_ID=$(echo "$BODY" | jq -r '.id // .proof.id // empty')
+        POLY=$(echo "$BODY" | jq -r '.polygon_status // .proof.polygon_status // "PENDING"')
+        READY=$(echo "$BODY" | jq -r '.evidence_readiness // .proof.evidence_readiness // empty')
+        VERIFY_URL="${PL_API_URL}/api/v1/verify?hash=${PL_HASH}"
 
         echo "proof-id=$PROOF_ID" >> "$GITHUB_OUTPUT"
-        echo "hash=$PA_HASH" >> "$GITHUB_OUTPUT"
+        echo "hash=$PL_HASH" >> "$GITHUB_OUTPUT"
         echo "verify-url=$VERIFY_URL" >> "$GITHUB_OUTPUT"
-        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "status=$POLY" >> "$GITHUB_OUTPUT"
+        echo "evidence-readiness=$READY" >> "$GITHUB_OUTPUT"
 
-        echo "### ProofAnchor Timestamp" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
-        echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
-        echo "| **SHA-256** | \`$PA_HASH\` |" >> "$GITHUB_STEP_SUMMARY"
-        echo "| **Proof ID** | \`$PROOF_ID\` |" >> "$GITHUB_STEP_SUMMARY"
-        echo "| **Status** | $STATUS |" >> "$GITHUB_STEP_SUMMARY"
-        echo "| **Verify** | [proofanchor.com/verify/$PROOF_ID]($VERIFY_URL) |" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
+        {
+          echo "### ProofLedger Timestamp"
+          echo ""
+          echo "| Field | Value |"
+          echo "|-------|-------|"
+          echo "| **SHA-256** | \`$PL_HASH\` |"
+          echo "| **Proof ID** | \`$PROOF_ID\` |"
+          echo "| **Polygon** | $POLY |"
+          if [ -n "$READY" ]; then echo "| **Evidence readiness** | $READY |"; fi
+          echo "| **Verify (API)** | \`GET $VERIFY_URL\` |"
+          echo ""
+          echo "Anyone can verify this hash without a ProofLedger account, or offline with the \`verify-proof\` package on PyPI."
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Append to release body
       if: inputs.add-to-release == 'true' && github.event_name == 'release'
@@ -149,7 +171,7 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         VERIFY_URL: ${{ steps.anchor.outputs.verify-url }}
-        PA_HASH: ${{ steps.anchor.outputs.hash }}
+        PL_HASH: ${{ steps.anchor.outputs.hash }}
         PROOF_ID: ${{ steps.anchor.outputs.proof-id }}
       run: |
         CURRENT_BODY=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}" --jq '.body')
@@ -158,9 +180,10 @@ runs:
 
         ---
 
-        **Blockchain Timestamp** — [Verify on ProofAnchor](${VERIFY_URL})
-        SHA-256: \`${PA_HASH}\`
+        **Blockchain timestamp.** This release artifact's SHA-256 hash was anchored to Polygon at publish time via [ProofLedger](https://proofledger.io).
+        SHA-256: \`${PL_HASH}\`
         Proof ID: \`${PROOF_ID}\`
+        Verify: \`curl "${VERIFY_URL}"\` (no account required)
         BLOCK
         )
 

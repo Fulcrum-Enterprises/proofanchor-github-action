@@ -1,17 +1,20 @@
-# ProofAnchor — Timestamp Release
+# ProofLedger — Timestamp Release
 
-Anchor a SHA-256 hash of your release artifact to the **Polygon blockchain** via [ProofAnchor](https://proofanchor.com). Immutable, verifiable, permanent.
+Anchor a SHA-256 hash of your release artifact to the **Polygon** and, optionally, **Bitcoin** blockchains via [ProofLedger](https://proofledger.io).
 
-One line in your workflow. Proof that your release existed at a specific point in time.
+One step in your workflow. Independent proof that your release existed at a specific point in time, verifiable by anyone without a ProofLedger account.
+
+> **Renamed from ProofAnchor (August 2026).** ProofAnchor was retired and consolidated into ProofLedger. Versions before `v2` called `proofanchor.com`, which no longer serves an API, so **`v1` no longer works and has been repointed at this code**. If you pinned a commit SHA, move to `@v2`.
 
 ## Why
 
-- **Supply chain integrity** — prove your release binary hasn't been tampered with
-- **Timestamp evidence** — immutable blockchain proof of when your release was published
-- **Zero key management** — no wallet, no private keys, no crypto knowledge needed
-- **Automatic** — runs on every release, appends verification link to release notes
+- **Supply chain integrity.** Prove a published binary is byte-for-byte the one you built.
+- **Timestamp evidence.** An immutable record of when the release existed, independent of your repo, your CI logs, and your own servers.
+- **Your file never leaves the runner.** Only the SHA-256 digest is sent. ProofLedger never receives the artifact.
+- **Verifiable by anyone.** No account, no API key, no cooperation from ProofLedger required. Offline verification via the [`verify-proof`](https://pypi.org/project/verify-proof/) package on PyPI.
+- **Zero key management.** No wallet, no private keys, no crypto knowledge.
 
-## Quick Start
+## Quick start
 
 ```yaml
 name: Timestamp Release
@@ -23,139 +26,107 @@ jobs:
   timestamp:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # needed to update release body
+      contents: write  # needed to update the release body
     steps:
       - uses: actions/checkout@v4
 
       - name: Build release artifact
         run: zip -r dist/release.zip src/
 
-      - name: Timestamp with ProofAnchor
-        uses: Fulcrum-Enterprises/proofanchor-github-action@v1
+      - name: Timestamp with ProofLedger
+        uses: Fulcrum-Enterprises/proofanchor-github-action@v2
         with:
-          api-key: ${{ secrets.PROOFANCHOR_API_KEY }}
+          api-key: ${{ secrets.PROOFLEDGER_API_KEY }}
           file: dist/release.zip
 ```
 
-That's it. Your release notes now include a blockchain verification link.
+Your release notes now carry the hash, the proof ID, and a verification command anyone can run.
+
+## Getting an API key
+
+API keys are issued from **Account → API Keys** at [proofledger.io](https://proofledger.io) on the BUSINESS plan, and start with `sk_`. Store it as a repository secret, never in the workflow file.
+
+Polygon anchoring is unlimited on every ProofLedger plan. Bitcoin anchoring is a separate per-anchor escalation and is off unless you ask for it with `bitcoin: true`.
 
 ## Inputs
 
-| Input | Required | Description |
-|-------|----------|-------------|
-| `api-key` | Yes | ProofAnchor API key (starts with `pa_`). Get one at [proofanchor.com/settings](https://proofanchor.com/settings) |
-| `file` | One of file/hash | Path to the file to timestamp |
-| `hash` | One of file/hash | Pre-computed SHA-256 hash (64 hex chars) |
-| `title` | No | Title for the proof (defaults to filename or release tag) |
-| `description` | No | Description for the proof |
-| `api-url` | No | API base URL (default: `https://proofanchor.com`) |
-| `add-to-release` | No | Append proof details to release body (default: `true`) |
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `api-key` | yes | | ProofLedger API key (`sk_...`). |
+| `file` | one of | | Path to the file to timestamp. Mutually exclusive with `hash`. |
+| `hash` | one of | | Pre-computed 64-character SHA-256 hex digest. Mutually exclusive with `file`. |
+| `filename` | no | filename or `Release <tag>` | Label shown in your ProofLedger dashboard. |
+| `bitcoin` | no | `false` | Also queue the proof for Bitcoin anchoring (Merkle-batched daily). |
+| `api-url` | no | `https://proofledger.io` | Override for staging. |
+| `add-to-release` | no | `true` | Append proof details to the GitHub release body. |
 
 ## Outputs
 
 | Output | Description |
 |--------|-------------|
-| `proof-id` | Public ID of the anchored proof |
-| `hash` | SHA-256 hash that was anchored |
-| `verify-url` | Public verification URL |
-| `status` | Proof status (`pending`, `anchored`, `failed`) |
+| `proof-id` | ProofLedger proof ID. |
+| `hash` | The SHA-256 that was anchored. |
+| `verify-url` | Public verification API URL for this hash. |
+| `status` | Polygon anchoring status (`ANCHORED` or `PENDING`). |
+| `evidence-readiness` | ProofLedger's readiness value, e.g. `READY_POLYGON`, `READY_BITCOIN`. |
 
-## Examples
+## Anchoring an existing hash
 
-### Timestamp a release artifact
-
-```yaml
-- uses: Fulcrum-Enterprises/proofanchor-github-action@v1
-  with:
-    api-key: ${{ secrets.PROOFANCHOR_API_KEY }}
-    file: dist/myapp-v1.2.3.tar.gz
-```
-
-### Timestamp a pre-computed hash
+If you already computed the digest, skip the file:
 
 ```yaml
-- name: Compute hash
-  id: hash
-  run: echo "hash=$(sha256sum dist/release.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-
-- uses: Fulcrum-Enterprises/proofanchor-github-action@v1
-  with:
-    api-key: ${{ secrets.PROOFANCHOR_API_KEY }}
-    hash: ${{ steps.hash.outputs.hash }}
-    title: "Release ${{ github.ref_name }}"
+      - name: Timestamp a known digest
+        uses: Fulcrum-Enterprises/proofanchor-github-action@v2
+        with:
+          api-key: ${{ secrets.PROOFLEDGER_API_KEY }}
+          hash: ${{ steps.build.outputs.sha256 }}
+          filename: my-app-${{ github.ref_name }}.tar.gz
 ```
 
-### Timestamp a commit SHA
+## Also anchoring to Bitcoin
 
 ```yaml
-- uses: Fulcrum-Enterprises/proofanchor-github-action@v1
-  with:
-    api-key: ${{ secrets.PROOFANCHOR_API_KEY }}
-    hash: ${{ github.sha }}
-    title: "Commit ${{ github.sha }}"
+      - name: Timestamp with Bitcoin escalation
+        uses: Fulcrum-Enterprises/proofanchor-github-action@v2
+        with:
+          api-key: ${{ secrets.PROOFLEDGER_API_KEY }}
+          file: dist/release.zip
+          bitcoin: true
 ```
 
-### Use outputs in later steps
+Polygon confirms in seconds. Bitcoin is batched daily via a Merkle tree, so the Bitcoin status stays `PENDING` until the batch is anchored.
 
-```yaml
-- name: Timestamp
-  id: proof
-  uses: Fulcrum-Enterprises/proofanchor-github-action@v1
-  with:
-    api-key: ${{ secrets.PROOFANCHOR_API_KEY }}
-    file: dist/release.zip
+## Verifying a proof
 
-- name: Print verification URL
-  run: echo "Verify at ${{ steps.proof.outputs.verify-url }}"
+Anyone can check a hash against the chain, with no key and no account:
+
+```bash
+curl "https://proofledger.io/api/v1/verify?hash=<sha256>"
 ```
 
-### Skip release body annotation
+Or verify offline, without contacting ProofLedger at all:
 
-```yaml
-- uses: Fulcrum-Enterprises/proofanchor-github-action@v1
-  with:
-    api-key: ${{ secrets.PROOFANCHOR_API_KEY }}
-    file: dist/release.zip
-    add-to-release: "false"
+```bash
+pip install verify-proof
+verify-proof hash ./release.zip
 ```
 
-## How It Works
+There is also a verification page at [proofledger.io/verify](https://proofledger.io/verify) where you can paste a hash or a proof ID.
 
-1. Action computes SHA-256 of your file (or uses the hash you provide)
-2. Calls `POST /api/v1/proofs` on ProofAnchor with the hash
-3. ProofAnchor submits the hash to a smart contract on **Polygon mainnet**
-4. The blockchain transaction creates an immutable, timestamped record
-5. Anyone can verify the proof at the public verification URL — no account needed
+## What this does and does not prove
 
-## Verification
+It proves that a specific SHA-256 digest existed no later than the block it was anchored in. That is a statement about **timing**, and it is the part that is normally hardest to establish after a dispute starts.
 
-Every proof can be independently verified:
+It does not prove who created the file, that the file is original, or that its contents are true. Those are separate questions and a timestamp does not answer them.
 
-- **Web:** Visit the verification URL (e.g., `https://proofanchor.com/verify/abc123`)
-- **API:** `GET https://proofanchor.com/api/v1/verify/<sha256-hash>` (no auth required)
-- **On-chain:** Query the smart contract directly on Polygon (`0xEC24d9322E28e95D1b479C57564bae83af70766e`)
+## Failure modes
 
-## Getting an API Key
+The step fails loudly rather than silently on:
 
-1. Sign up at [proofanchor.com](https://proofanchor.com)
-2. Go to Settings > API Keys
-3. Create a new key (starts with `pa_`)
-4. Add it as a repository secret: Settings > Secrets > `PROOFANCHOR_API_KEY`
-
-Free tier includes 5 proofs. Pro ($9.99/mo) includes 50/month. Business ($49.99/mo) includes 500/month.
-
-## Requirements
-
-- A ProofAnchor account with an API key
-- `jq` and `curl` (pre-installed on all GitHub-hosted runners)
-- `permissions: contents: write` if using `add-to-release: true`
+- `401` / `403` — the key is missing, malformed, or not on a plan with API access.
+- `429` — the monthly proof limit for your plan has been reached.
+- Any other non-2xx, with the response body in the log.
 
 ## License
 
-MIT
-
-## Links
-
-- [ProofAnchor](https://proofanchor.com) — Prove you had it first
-- [API Documentation](https://proofanchor.com/api/v1)
-- [Fulcrum Enterprises](https://fulcrumenterprises.com) — Building the foundation for an AI driven future
+MIT. Copyright Fulcrum Enterprises LLC.
