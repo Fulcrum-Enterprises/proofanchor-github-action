@@ -44,7 +44,7 @@ Your release notes now carry the hash, the proof ID, and a verification command 
 
 ## Getting an API key
 
-API keys are issued from **Account → API Keys** at [proofledger.io](https://proofledger.io) on the BUSINESS plan, and start with `sk_`. Store it as a repository secret, never in the workflow file.
+API keys are issued from **Account → API Keys** at [proofledger.io](https://proofledger.io) on any plan, including Free, and start with `sk_`. Store it as a repository secret, never in the workflow file.
 
 Polygon anchoring is unlimited on every ProofLedger plan. Bitcoin anchoring is a separate per-anchor escalation and is off unless you ask for it with `bitcoin: true`.
 
@@ -123,7 +123,7 @@ It does not prove who created the file, that the file is original, or that its c
 
 The step fails loudly rather than silently on:
 
-- `401` / `403` — the key is missing, malformed, or not on a plan with API access.
+- `401` / `403` — the key is missing or malformed.
 - `429` — the monthly proof limit for your plan has been reached.
 - Any other non-2xx, with the response body in the log.
 

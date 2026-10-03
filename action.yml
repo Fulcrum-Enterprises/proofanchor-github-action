@@ -8,7 +8,7 @@ branding:
 
 inputs:
   api-key:
-    description: "ProofLedger API key (starts with sk_). Issued from Account > API Keys on the BUSINESS plan."
+    description: "ProofLedger API key (starts with sk_). Issued from Account > API Keys on any plan, including Free."
     required: true
   file:
     description: "Path to the file to timestamp (e.g. dist/app.zip). Mutually exclusive with 'hash'."
@@ -126,7 +126,7 @@ runs:
         BODY=$(echo "$RESPONSE" | sed '$d')
 
         if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
-          echo "::error::ProofLedger rejected the API key (HTTP $HTTP_CODE). API keys start with sk_ and are issued from Account > API Keys on the BUSINESS plan."
+          echo "::error::ProofLedger rejected the API key (HTTP $HTTP_CODE). API keys start with sk_ and are issued from Account > API Keys on any plan, including Free."
           exit 1
         fi
 
