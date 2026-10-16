@@ -1,6 +1,6 @@
 # ProofLedger — Timestamp Release
 
-Anchor a SHA-256 hash of your release artifact to the **Polygon** and, optionally, **Bitcoin** blockchains via [ProofLedger](https://proofledger.io).
+Anchor a SHA-256 hash of your release artifact on the **Polygon** blockchain via [ProofLedger](https://proofledger.io).
 
 One step in your workflow. Independent proof that your release existed at a specific point in time, verifiable by anyone without a ProofLedger account.
 
@@ -46,7 +46,7 @@ Your release notes now carry the hash, the proof ID, and a verification command 
 
 API keys are issued from **Account → API Keys** at [proofledger.io](https://proofledger.io) on any plan, including Free, and start with `sk_`. Store it as a repository secret, never in the workflow file.
 
-Polygon anchoring is unlimited on every ProofLedger plan. Bitcoin anchoring is a separate per-anchor escalation and is off unless you ask for it with `bitcoin: true`.
+Each run creates one proof, which counts toward your plan's monthly API allowance (100 on the free plan; see [pricing](https://proofledger.io/pricing.html)). Every proof is anchored on Polygon. Bitcoin anchoring was discontinued on 2026-10-15: the `bitcoin` input is still accepted so existing workflows keep running, and it is ignored.
 
 ## Inputs
 
@@ -56,7 +56,7 @@ Polygon anchoring is unlimited on every ProofLedger plan. Bitcoin anchoring is a
 | `file` | one of | | Path to the file to timestamp. Mutually exclusive with `hash`. |
 | `hash` | one of | | Pre-computed 64-character SHA-256 hex digest. Mutually exclusive with `file`. |
 | `filename` | no | filename or `Release <tag>` | Label shown in your ProofLedger dashboard. |
-| `bitcoin` | no | `false` | Also queue the proof for Bitcoin anchoring (Merkle-batched daily). |
+| `bitcoin` | no | `false` | Deprecated and ignored. Bitcoin anchoring ended on 2026-10-15; every proof is anchored on Polygon. |
 | `api-url` | no | `https://proofledger.io` | Override for staging. |
 | `add-to-release` | no | `true` | Append proof details to the GitHub release body. |
 
@@ -68,7 +68,7 @@ Polygon anchoring is unlimited on every ProofLedger plan. Bitcoin anchoring is a
 | `hash` | The SHA-256 that was anchored. |
 | `verify-url` | Public verification API URL for this hash. |
 | `status` | Polygon anchoring status (`ANCHORED` or `PENDING`). |
-| `evidence-readiness` | ProofLedger's readiness value, e.g. `READY_POLYGON`, `READY_BITCOIN`. |
+| `evidence-readiness` | ProofLedger's readiness value, e.g. `PENDING_POLYGON` or `READY_POLYGON`. |
 
 ## Anchoring an existing hash
 
@@ -83,19 +83,6 @@ If you already computed the digest, skip the file:
           filename: my-app-${{ github.ref_name }}.tar.gz
 ```
 
-## Also anchoring to Bitcoin
-
-```yaml
-      - name: Timestamp with Bitcoin escalation
-        uses: Fulcrum-Enterprises/proofanchor-github-action@v2
-        with:
-          api-key: ${{ secrets.PROOFLEDGER_API_KEY }}
-          file: dist/release.zip
-          bitcoin: true
-```
-
-Polygon confirms in seconds. Bitcoin is batched daily via a Merkle tree, so the Bitcoin status stays `PENDING` until the batch is anchored.
-
 ## Verifying a proof
 
 Anyone can check a hash against the chain, with no key and no account:
@@ -104,11 +91,11 @@ Anyone can check a hash against the chain, with no key and no account:
 curl "https://proofledger.io/api/v1/verify?hash=<sha256>"
 ```
 
-Or verify offline, without contacting ProofLedger at all:
+Or verify offline, without contacting ProofLedger at all, against the proof's bundle (fetch it once with `GET /api/v1/proof/<id>/bundle` and your key, and keep it next to the release):
 
 ```bash
 pip install verify-proof
-verify-proof hash ./release.zip
+verify-proof verify ./release.zip --proof bundle.json
 ```
 
 There is also a verification page at [proofledger.io/verify](https://proofledger.io/verify) where you can paste a hash or a proof ID.
@@ -123,8 +110,8 @@ It does not prove who created the file, that the file is original, or that its c
 
 The step fails loudly rather than silently on:
 
-- `401` / `403` — the key is missing or malformed.
-- `429` — the monthly proof limit for your plan has been reached.
+- `401` / `403`: the key is missing or malformed.
+- `429`: your plan's monthly API allowance is used up, or the key sent more than 120 requests a minute.
 - Any other non-2xx, with the response body in the log.
 
 ## License

@@ -1,5 +1,5 @@
 name: "ProofLedger — Timestamp Release"
-description: "Anchor a SHA-256 hash of your release artifact to the Polygon and Bitcoin blockchains via ProofLedger. Your file never leaves the runner."
+description: "Anchor a SHA-256 hash of your release artifact on the Polygon blockchain via ProofLedger. Your file never leaves the runner."
 author: "Craig Solomon / Fulcrum Enterprises LLC"
 
 branding:
@@ -20,7 +20,7 @@ inputs:
     description: "Label for the proof, shown in your ProofLedger dashboard. Defaults to the filename or 'Release <tag>'."
     required: false
   bitcoin:
-    description: "Also queue the proof for Bitcoin anchoring (Merkle-batched daily). Polygon anchoring happens either way."
+    description: "Deprecated and ignored: Bitcoin anchoring ended on 2026-10-15. Every proof is anchored on Polygon."
     required: false
     default: "false"
   api-url:
@@ -46,7 +46,7 @@ outputs:
     description: "Polygon anchoring status (ANCHORED or PENDING)"
     value: ${{ steps.anchor.outputs.status }}
   evidence-readiness:
-    description: "Evidence readiness reported by ProofLedger (e.g. READY_POLYGON, READY_BITCOIN)"
+    description: "Evidence readiness reported by ProofLedger (e.g. PENDING_POLYGON, READY_POLYGON)"
     value: ${{ steps.anchor.outputs.evidence-readiness }}
 
 runs:
@@ -108,13 +108,14 @@ runs:
         PL_FILENAME: ${{ steps.label.outputs.filename }}
         PL_BITCOIN: ${{ inputs.bitcoin }}
       run: |
-        if [ "$PL_BITCOIN" = "true" ]; then BTC=true; else BTC=false; fi
+        if [ "$PL_BITCOIN" = "true" ]; then
+          echo "::warning::The bitcoin input is ignored: Bitcoin anchoring ended on 2026-10-15. The proof is anchored on Polygon."
+        fi
 
         BODY=$(jq -n \
           --arg hash "$PL_HASH" \
           --arg filename "$PL_FILENAME" \
-          --argjson bitcoin "$BTC" \
-          '{sha256: $hash, filename: $filename, bitcoin_requested: $bitcoin}')
+          '{sha256: $hash, filename: $filename}')
 
         RESPONSE=$(curl -s -w "\n%{http_code}" \
           -X POST "${PL_API_URL}/api/v1/proof" \
