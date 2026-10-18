@@ -4,14 +4,14 @@ Anchor a SHA-256 hash of your release artifact on the **Polygon** blockchain via
 
 One step in your workflow. Independent proof that your release existed at a specific point in time, verifiable by anyone without a ProofLedger account.
 
-> **Renamed from ProofAnchor (August 2026).** ProofAnchor was retired and consolidated into ProofLedger. Versions before `v2` called `proofanchor.com`, which no longer serves an API, so **`v1` no longer works and has been repointed at this code**. If you pinned a commit SHA, move to `@v2`.
+> **Renamed from ProofAnchor (August 2026).** ProofAnchor was retired and consolidated into ProofLedger. Versions before `v2` called `proofanchor.com`, which no longer serves an API. The `v1` tag now points at this code, so `@v1` keeps working. A workflow pinned to an older commit SHA still calls proofanchor.com: move it to `@v2`.
 
 ## Why
 
-- **Supply chain integrity.** Prove a published binary is byte-for-byte the one you built.
-- **Timestamp evidence.** An immutable record of when the release existed, independent of your repo, your CI logs, and your own servers.
-- **Your file never leaves the runner.** Only the SHA-256 digest is sent. ProofLedger never receives the artifact.
-- **Verifiable by anyone.** No account, no API key, no cooperation from ProofLedger required. Offline verification via the [`verify-proof`](https://pypi.org/project/verify-proof/) package on PyPI.
+- **Supply chain integrity.** Show that a published binary is byte-for-byte the file your workflow anchored at release time.
+- **Timestamp record.** A public, tamper-evident record on Polygon of when the release existed, independent of your repo, your CI logs and your own servers.
+- **Your file never leaves the runner.** Only the SHA-256 digest and a label (the file name, or the `filename` input) are sent. ProofLedger never receives the artifact. The label appears on the public certificate, so if the file name is private, set `filename` to a neutral label.
+- **Verifiable by anyone.** No account and no API key. Keep the proof's bundle with the release and anyone can check it offline with the [`verify-proof`](https://pypi.org/project/verify-proof/) package on PyPI, and look the Polygon transaction up on any block explorer, with no cooperation from ProofLedger.
 - **Zero key management.** No wallet, no private keys, no crypto knowledge.
 
 ## Quick start
@@ -40,7 +40,7 @@ jobs:
           file: dist/release.zip
 ```
 
-Your release notes now carry the hash, the proof ID, and a verification command anyone can run.
+Your release notes now carry the hash, the proof ID, and ProofLedger's public lookup command, which anyone can run without an account. Once the anchor lands (usually within a minute), the lookup names the Polygon transaction, which anyone can check on a block explorer.
 
 ## Getting an API key
 
@@ -55,7 +55,7 @@ Each run creates one proof, which counts toward your plan's monthly API allowanc
 | `api-key` | yes | | ProofLedger API key (`sk_...`). |
 | `file` | one of | | Path to the file to timestamp. Mutually exclusive with `hash`. |
 | `hash` | one of | | Pre-computed 64-character SHA-256 hex digest. Mutually exclusive with `file`. |
-| `filename` | no | filename or `Release <tag>` | Label shown in your ProofLedger dashboard. |
+| `filename` | no | filename or `Release <tag>` | Label stored with the proof. It appears on the public certificate and in your dashboard. |
 | `bitcoin` | no | `false` | Deprecated and ignored. Bitcoin anchoring ended on 2026-10-15; every proof is anchored on Polygon. |
 | `api-url` | no | `https://proofledger.io` | Override for staging. |
 | `add-to-release` | no | `true` | Append proof details to the GitHub release body. |
@@ -65,10 +65,10 @@ Each run creates one proof, which counts toward your plan's monthly API allowanc
 | Output | Description |
 |--------|-------------|
 | `proof-id` | ProofLedger proof ID. |
-| `hash` | The SHA-256 that was anchored. |
-| `verify-url` | Public verification API URL for this hash. |
+| `hash` | The SHA-256 that was submitted for anchoring. |
+| `verify-url` | ProofLedger's public lookup URL for this hash. |
 | `status` | Polygon anchoring status (`ANCHORED` or `PENDING`). |
-| `evidence-readiness` | ProofLedger's readiness value, e.g. `PENDING_POLYGON` or `READY_POLYGON`. |
+| `evidence-readiness` | Anchoring readiness reported by ProofLedger, e.g. `PENDING_POLYGON` or `READY_POLYGON`. The output keeps this name so existing workflows do not break. |
 
 ## Anchoring an existing hash
 
@@ -85,20 +85,20 @@ If you already computed the digest, skip the file:
 
 ## Verifying a proof
 
-Anyone can check a hash against the chain, with no key and no account:
+ProofLedger's public lookup shows whether a hash has a proof, with no key and no account:
 
 ```bash
 curl "https://proofledger.io/api/v1/verify?hash=<sha256>"
 ```
 
-Or verify offline, without contacting ProofLedger at all, against the proof's bundle (fetch it once with `GET /api/v1/proof/<id>/bundle` and your key, and keep it next to the release):
+To check the record itself, look up the Polygon transaction on any block explorer, or verify offline, without contacting ProofLedger at all, against the proof's bundle (fetch it once with `GET /api/v1/proof/<id>/bundle` and your key, and keep it next to the release):
 
 ```bash
 pip install verify-proof
 verify-proof verify ./release.zip --proof bundle.json
 ```
 
-There is also a verification page at [proofledger.io/verify](https://proofledger.io/verify) where you can paste a hash or a proof ID.
+There is also a verification page at [proofledger.io/verify](https://proofledger.io/verify) where you can paste the hash.
 
 ## What this does and does not prove
 
@@ -111,7 +111,7 @@ It does not prove who created the file, that the file is original, or that its c
 The step fails loudly rather than silently on:
 
 - `401` / `403`: the key is missing or malformed.
-- `429`: your plan's monthly API allowance is used up, or the key sent more than 120 requests a minute.
+- `429`: on the Free plan, this month's 100 API proofs are used up (paid plans continue at $0.01 a proof), or the key sent more than 120 requests in a minute.
 - Any other non-2xx, with the response body in the log.
 
 ## License

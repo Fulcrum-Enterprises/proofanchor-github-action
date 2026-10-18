@@ -17,7 +17,7 @@ inputs:
     description: "Pre-computed SHA-256 hash to anchor. Mutually exclusive with 'file'."
     required: false
   filename:
-    description: "Label for the proof, shown in your ProofLedger dashboard. Defaults to the filename or 'Release <tag>'."
+    description: "Label stored with the proof. It appears on the public certificate and in your ProofLedger dashboard. Defaults to the filename or 'Release <tag>'."
     required: false
   bitcoin:
     description: "Deprecated and ignored: Bitcoin anchoring ended on 2026-10-15. Every proof is anchored on Polygon."
@@ -37,16 +37,16 @@ outputs:
     description: "ProofLedger proof ID"
     value: ${{ steps.anchor.outputs.proof-id }}
   hash:
-    description: "SHA-256 hash that was anchored"
+    description: "SHA-256 hash that was submitted for anchoring"
     value: ${{ steps.anchor.outputs.hash }}
   verify-url:
-    description: "Public verification API URL for this hash"
+    description: "ProofLedger's public lookup URL for this hash"
     value: ${{ steps.anchor.outputs.verify-url }}
   status:
     description: "Polygon anchoring status (ANCHORED or PENDING)"
     value: ${{ steps.anchor.outputs.status }}
   evidence-readiness:
-    description: "Evidence readiness reported by ProofLedger (e.g. PENDING_POLYGON, READY_POLYGON)"
+    description: "Anchoring readiness reported by ProofLedger (e.g. PENDING_POLYGON, READY_POLYGON)"
     value: ${{ steps.anchor.outputs.evidence-readiness }}
 
 runs:
@@ -132,7 +132,7 @@ runs:
         fi
 
         if [ "$HTTP_CODE" = "429" ]; then
-          echo "::error::ProofLedger monthly proof limit reached (HTTP 429): $BODY"
+          echo "::error::ProofLedger answered 429: either this month's Free allowance is used up, or the key sent more than 120 requests in a minute. $BODY"
           exit 1
         fi
 
@@ -160,10 +160,10 @@ runs:
           echo "| **SHA-256** | \`$PL_HASH\` |"
           echo "| **Proof ID** | \`$PROOF_ID\` |"
           echo "| **Polygon** | $POLY |"
-          if [ -n "$READY" ]; then echo "| **Evidence readiness** | $READY |"; fi
-          echo "| **Verify (API)** | \`GET $VERIFY_URL\` |"
+          if [ -n "$READY" ]; then echo "| **Anchoring status** | $READY |"; fi
+          echo "| **ProofLedger lookup** | \`GET $VERIFY_URL\` |"
           echo ""
-          echo "Anyone can verify this hash without a ProofLedger account, or offline with the \`verify-proof\` package on PyPI."
+          echo "Anyone can look this hash up on ProofLedger without an account. Once the anchor lands, the Polygon transaction can be checked on any block explorer, and the proof's bundle verifies offline with the \`verify-proof\` package on PyPI."
         } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Append to release body
@@ -174,17 +174,26 @@ runs:
         VERIFY_URL: ${{ steps.anchor.outputs.verify-url }}
         PL_HASH: ${{ steps.anchor.outputs.hash }}
         PROOF_ID: ${{ steps.anchor.outputs.proof-id }}
+        PL_STATUS: ${{ steps.anchor.outputs.status }}
       run: |
+        # Say "anchored" only when ProofLedger already reported the anchor; a new proof is
+        # usually still PENDING at this point.
+        if [ "$PL_STATUS" = "ANCHORED" ]; then
+          ANCHOR_LINE="This release artifact's SHA-256 hash was anchored on Polygon via [ProofLedger](https://proofledger.io)."
+        else
+          ANCHOR_LINE="This release artifact's SHA-256 hash was submitted to [ProofLedger](https://proofledger.io) at publish time for anchoring on Polygon (the anchor usually lands within a minute)."
+        fi
+
         CURRENT_BODY=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}" --jq '.body')
 
         PROOF_BLOCK=$(cat <<BLOCK
 
         ---
 
-        **Blockchain timestamp.** This release artifact's SHA-256 hash was anchored to Polygon at publish time via [ProofLedger](https://proofledger.io).
+        **Blockchain timestamp.** ${ANCHOR_LINE}
         SHA-256: \`${PL_HASH}\`
         Proof ID: \`${PROOF_ID}\`
-        Verify: \`curl "${VERIFY_URL}"\` (no account required)
+        Look it up: \`curl "${VERIFY_URL}"\` (ProofLedger's public lookup, no account required). Once anchored it names the Polygon transaction, which anyone can check on a block explorer such as polygonscan.com.
         BLOCK
         )
 
