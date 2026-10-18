@@ -26,7 +26,7 @@ jobs:
   timestamp:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # needed to update the release body
+      contents: write  # needed to update the release body and attach the proof bundle
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +40,9 @@ jobs:
           file: dist/release.zip
 ```
 
-Your release notes now carry the hash, the proof ID, and ProofLedger's public lookup command, which anyone can run without an account. Once the anchor lands (usually within a minute), the lookup names the Polygon transaction, which anyone can check on a block explorer.
+The step waits for the Polygon anchor to land (usually within a minute, up to `wait-for-anchor` seconds), then attaches the proof bundle (`release.zip.proof.json`) to the release and writes the hash, the proof ID, a link to the Polygon transaction and the offline check command into the release notes. Anyone can check the transaction on a block explorer, or run `verify-proof verify release.zip --proof release.zip.proof.json` against the two attached files without contacting ProofLedger.
+
+If the anchor has not landed within the wait, the release notes carry the hash, the proof ID and ProofLedger's public lookup command instead; the lookup names the transaction once it lands, and the bundle can be fetched later with `GET /api/v1/proof/<id>/bundle`.
 
 ## Getting an API key
 
@@ -59,6 +61,8 @@ Each run creates one proof, which counts toward your plan's monthly API allowanc
 | `bitcoin` | no | `false` | Deprecated and ignored. Bitcoin anchoring ended on 2026-10-15; every proof is anchored on Polygon. |
 | `api-url` | no | `https://proofledger.io` | Override for staging. |
 | `add-to-release` | no | `true` | Append proof details to the GitHub release body. |
+| `wait-for-anchor` | no | `120` | Seconds to wait for the Polygon anchor before fetching the bundle. `0` skips the wait, and then no bundle is fetched. |
+| `attach-bundle` | no | `true` | On a release event, upload the proof bundle (`<label>.proof.json`) as a release asset once the anchor has landed. |
 
 ## Outputs
 
@@ -67,8 +71,12 @@ Each run creates one proof, which counts toward your plan's monthly API allowanc
 | `proof-id` | ProofLedger proof ID. |
 | `hash` | The SHA-256 that was submitted for anchoring. |
 | `verify-url` | ProofLedger's public lookup URL for this hash. |
-| `status` | Polygon anchoring status (`ANCHORED` or `PENDING`). |
-| `evidence-readiness` | Anchoring readiness reported by ProofLedger, e.g. `PENDING_POLYGON` or `READY_POLYGON`. The output keeps this name so existing workflows do not break. |
+| `status` | Polygon anchoring status after the wait (`ANCHORED` or `PENDING`). |
+| `evidence-readiness` | Anchoring readiness reported by ProofLedger after the wait, e.g. `PENDING_POLYGON` or `READY_POLYGON`. The output keeps this name so existing workflows do not break. |
+| `chain-tx` | Polygon transaction hash. Empty while the anchor is still pending. |
+| `explorer-url` | Block explorer link for that transaction. Empty while pending. |
+| `anchored-at` | When the transaction was recorded (ISO 8601, UTC). Empty while pending. |
+| `bundle-path` | Path on the runner of the saved bundle (`<label>.proof.json`). Empty if the anchor had not landed within the wait. On a non-release event, hand it to `actions/upload-artifact` or commit it next to the artifact. |
 
 ## Anchoring an existing hash
 
@@ -91,11 +99,11 @@ ProofLedger's public lookup shows whether a hash has a proof, with no key and no
 curl "https://proofledger.io/api/v1/verify?hash=<sha256>"
 ```
 
-To check the record itself, look up the Polygon transaction on any block explorer, or verify offline, without contacting ProofLedger at all, against the proof's bundle (fetch it once with `GET /api/v1/proof/<id>/bundle` and your key, and keep it next to the release):
+To check the record itself, open the Polygon transaction linked in the release notes on any block explorer, or verify offline, without contacting ProofLedger at all, against the proof bundle the Action attached to the release (or fetch it once with `GET /api/v1/proof/<id>/bundle` and your key):
 
 ```bash
 pip install verify-proof
-verify-proof verify ./release.zip --proof bundle.json
+verify-proof verify ./release.zip --proof release.zip.proof.json
 ```
 
 There is also a verification page at [proofledger.io/verify](https://proofledger.io/verify) where you can paste the hash.

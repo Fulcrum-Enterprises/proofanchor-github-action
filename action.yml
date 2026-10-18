@@ -31,6 +31,14 @@ inputs:
     description: "Add proof details to the GitHub release body (true/false)."
     required: false
     default: "true"
+  wait-for-anchor:
+    description: "Seconds to wait for the Polygon anchor to land before fetching the proof bundle (the anchor usually lands within a minute). 0 skips the wait; the bundle is then not fetched."
+    required: false
+    default: "120"
+  attach-bundle:
+    description: "On a release event, upload the proof bundle (<label>.proof.json) as a release asset once the anchor has landed (true/false). The bundle is what verify-proof checks the file against offline."
+    required: false
+    default: "true"
 
 outputs:
   proof-id:
@@ -43,11 +51,23 @@ outputs:
     description: "ProofLedger's public lookup URL for this hash"
     value: ${{ steps.anchor.outputs.verify-url }}
   status:
-    description: "Polygon anchoring status (ANCHORED or PENDING)"
-    value: ${{ steps.anchor.outputs.status }}
+    description: "Polygon anchoring status after the wait (ANCHORED or PENDING)"
+    value: ${{ steps.wait.outputs.status }}
   evidence-readiness:
-    description: "Anchoring readiness reported by ProofLedger (e.g. PENDING_POLYGON, READY_POLYGON)"
-    value: ${{ steps.anchor.outputs.evidence-readiness }}
+    description: "Anchoring readiness reported by ProofLedger after the wait (e.g. PENDING_POLYGON, READY_POLYGON)"
+    value: ${{ steps.wait.outputs.evidence-readiness }}
+  chain-tx:
+    description: "Polygon transaction hash, empty while the anchor is still pending"
+    value: ${{ steps.wait.outputs.chain-tx }}
+  explorer-url:
+    description: "Block explorer link for the Polygon transaction, empty while pending"
+    value: ${{ steps.wait.outputs.explorer-url }}
+  anchored-at:
+    description: "When the Polygon transaction was recorded (ISO 8601, UTC), empty while pending"
+    value: ${{ steps.wait.outputs.anchored-at }}
+  bundle-path:
+    description: "Path on the runner of the saved proof bundle (<label>.proof.json), empty if the anchor had not landed within the wait"
+    value: ${{ steps.bundle.outputs.bundle-path }}
 
 runs:
   using: "composite"
@@ -151,7 +171,122 @@ runs:
         echo "verify-url=$VERIFY_URL" >> "$GITHUB_OUTPUT"
         echo "status=$POLY" >> "$GITHUB_OUTPUT"
         echo "evidence-readiness=$READY" >> "$GITHUB_OUTPUT"
+        echo "Proof $PROOF_ID created ($POLY)."
 
+    - name: Wait for the Polygon anchor
+      id: wait
+      shell: bash
+      env:
+        PL_API_KEY: ${{ inputs.api-key }}
+        PL_API_URL: ${{ inputs.api-url }}
+        PROOF_ID: ${{ steps.anchor.outputs.proof-id }}
+        PL_STATUS: ${{ steps.anchor.outputs.status }}
+        PL_READY: ${{ steps.anchor.outputs.evidence-readiness }}
+        WAIT_SECONDS: ${{ inputs.wait-for-anchor }}
+      run: |
+        # Poll the proof every 10 seconds until ProofLedger reports the anchor or the wait
+        # runs out. The anchor usually lands within a minute. Nothing here fails the job:
+        # a proof that is still pending is still a proof, and the public lookup will name
+        # the transaction once it lands.
+        STATUS="$PL_STATUS"; READY="$PL_READY"; TX=""; EXPLORER=""; ANCHORED_AT=""
+        if ! echo "$WAIT_SECONDS" | grep -qE '^[0-9]+$'; then
+          echo "::warning::wait-for-anchor must be a whole number of seconds; got '$WAIT_SECONDS'. Using 120."
+          WAIT_SECONDS=120
+        fi
+        DEADLINE=$((SECONDS + WAIT_SECONDS))
+        while [ -n "$PROOF_ID" ]; do
+          P=$(curl -s -H "Authorization: Bearer ${PL_API_KEY}" "${PL_API_URL}/api/v1/proof/${PROOF_ID}")
+          S=$(echo "$P" | jq -r '.polygon_status // empty')
+          if [ -n "$S" ]; then
+            STATUS="$S"
+            READY=$(echo "$P" | jq -r '.evidence_readiness // empty')
+          fi
+          if [ "$STATUS" = "ANCHORED" ]; then
+            TX=$(echo "$P" | jq -r '.chain_tx // empty')
+            EXPLORER=$(echo "$P" | jq -r '.explorer_url // empty')
+            ANCHORED_AT=$(echo "$P" | jq -r '.polygon_anchored_at // empty')
+            break
+          fi
+          if [ "$SECONDS" -ge "$DEADLINE" ]; then
+            break
+          fi
+          sleep 10
+        done
+
+        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "evidence-readiness=$READY" >> "$GITHUB_OUTPUT"
+        echo "chain-tx=$TX" >> "$GITHUB_OUTPUT"
+        echo "explorer-url=$EXPLORER" >> "$GITHUB_OUTPUT"
+        echo "anchored-at=$ANCHORED_AT" >> "$GITHUB_OUTPUT"
+
+        if [ "$STATUS" = "ANCHORED" ]; then
+          echo "Anchored on Polygon: $TX ($ANCHORED_AT)"
+        else
+          echo "::notice::The Polygon anchor had not landed within ${WAIT_SECONDS}s. The proof exists; look the hash up later and it will name the transaction. Raise wait-for-anchor to attach the bundle in the same run."
+        fi
+
+    - name: Fetch the proof bundle
+      id: bundle
+      shell: bash
+      env:
+        PL_API_KEY: ${{ inputs.api-key }}
+        PL_API_URL: ${{ inputs.api-url }}
+        PROOF_ID: ${{ steps.anchor.outputs.proof-id }}
+        PL_STATUS: ${{ steps.wait.outputs.status }}
+        PL_FILENAME: ${{ steps.label.outputs.filename }}
+      run: |
+        # The bundle is the one document verify-proof checks the file against offline:
+        # hash, chain, transaction id and anchor time. It is only fetched once the
+        # transaction exists, so a bundle attached to a release always names one.
+        BUNDLE_PATH=""
+        if [ "$PL_STATUS" = "ANCHORED" ] && [ -n "$PROOF_ID" ]; then
+          SAFE=$(printf '%s' "$PL_FILENAME" | tr -c 'A-Za-z0-9._-' '_')
+          [ -n "$SAFE" ] || SAFE="proof-${PROOF_ID}"
+          BUNDLE_PATH="${RUNNER_TEMP}/${SAFE}.proof.json"
+          CODE=$(curl -s -o "$BUNDLE_PATH" -w "%{http_code}" \
+            -H "Authorization: Bearer ${PL_API_KEY}" \
+            "${PL_API_URL}/api/v1/proof/${PROOF_ID}/bundle?download=1")
+          if [ "$CODE" != "200" ] || ! jq -e '.tx_id' "$BUNDLE_PATH" >/dev/null 2>&1; then
+            echo "::warning::Could not fetch the proof bundle (HTTP $CODE). The proof is unaffected; fetch it later with GET /api/v1/proof/${PROOF_ID}/bundle."
+            rm -f "$BUNDLE_PATH"
+            BUNDLE_PATH=""
+          else
+            echo "Saved proof bundle to $BUNDLE_PATH"
+          fi
+        fi
+        echo "bundle-path=$BUNDLE_PATH" >> "$GITHUB_OUTPUT"
+
+    - name: Attach the bundle to the release
+      id: attach
+      if: inputs.attach-bundle == 'true' && github.event_name == 'release' && steps.bundle.outputs.bundle-path != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BUNDLE_PATH: ${{ steps.bundle.outputs.bundle-path }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: |
+        if gh release upload "$RELEASE_TAG" "$BUNDLE_PATH" --clobber --repo "${{ github.repository }}"; then
+          echo "attached=$(basename "$BUNDLE_PATH")" >> "$GITHUB_OUTPUT"
+          echo "Attached $(basename "$BUNDLE_PATH") to release $RELEASE_TAG."
+        else
+          echo "::warning::Could not attach the bundle to the release. The job needs 'permissions: contents: write'. The bundle is still at $BUNDLE_PATH for this run."
+          echo "attached=" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Write the job summary
+      shell: bash
+      env:
+        PL_HASH: ${{ steps.anchor.outputs.hash }}
+        PROOF_ID: ${{ steps.anchor.outputs.proof-id }}
+        VERIFY_URL: ${{ steps.anchor.outputs.verify-url }}
+        PL_STATUS: ${{ steps.wait.outputs.status }}
+        READY: ${{ steps.wait.outputs.evidence-readiness }}
+        TX: ${{ steps.wait.outputs.chain-tx }}
+        EXPLORER: ${{ steps.wait.outputs.explorer-url }}
+        ANCHORED_AT: ${{ steps.wait.outputs.anchored-at }}
+        BUNDLE_PATH: ${{ steps.bundle.outputs.bundle-path }}
+        ATTACHED: ${{ steps.attach.outputs.attached }}
+      run: |
         {
           echo "### ProofLedger Timestamp"
           echo ""
@@ -159,11 +294,18 @@ runs:
           echo "|-------|-------|"
           echo "| **SHA-256** | \`$PL_HASH\` |"
           echo "| **Proof ID** | \`$PROOF_ID\` |"
-          echo "| **Polygon** | $POLY |"
+          echo "| **Polygon** | $PL_STATUS |"
           if [ -n "$READY" ]; then echo "| **Anchoring status** | $READY |"; fi
+          if [ -n "$TX" ]; then echo "| **Transaction** | [\`$TX\`]($EXPLORER) |"; fi
+          if [ -n "$ANCHORED_AT" ]; then echo "| **Anchored at** | $ANCHORED_AT |"; fi
+          if [ -n "$ATTACHED" ]; then echo "| **Proof bundle** | \`$ATTACHED\` attached to the release |"; elif [ -n "$BUNDLE_PATH" ]; then echo "| **Proof bundle** | \`$BUNDLE_PATH\` on the runner (not attached) |"; fi
           echo "| **ProofLedger lookup** | \`GET $VERIFY_URL\` |"
           echo ""
-          echo "Anyone can look this hash up on ProofLedger without an account. Once the anchor lands, the Polygon transaction can be checked on any block explorer, and the proof's bundle verifies offline with the \`verify-proof\` package on PyPI."
+          if [ -n "$TX" ]; then
+            echo "Anyone can check the transaction on a block explorer, and the proof bundle verifies the file offline with the \`verify-proof\` package on PyPI: \`verify-proof verify <file> --proof <bundle>\`."
+          else
+            echo "Anyone can look this hash up on ProofLedger without an account. Once the anchor lands, the lookup names the Polygon transaction, which anyone can check on a block explorer, and \`GET /api/v1/proof/$PROOF_ID/bundle\` returns the bundle that verifies the file offline with the \`verify-proof\` package on PyPI."
+          fi
         } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Append to release body
@@ -174,14 +316,26 @@ runs:
         VERIFY_URL: ${{ steps.anchor.outputs.verify-url }}
         PL_HASH: ${{ steps.anchor.outputs.hash }}
         PROOF_ID: ${{ steps.anchor.outputs.proof-id }}
-        PL_STATUS: ${{ steps.anchor.outputs.status }}
+        PL_STATUS: ${{ steps.wait.outputs.status }}
+        TX: ${{ steps.wait.outputs.chain-tx }}
+        EXPLORER: ${{ steps.wait.outputs.explorer-url }}
+        ANCHORED_AT: ${{ steps.wait.outputs.anchored-at }}
+        ATTACHED: ${{ steps.attach.outputs.attached }}
+        INPUT_FILE: ${{ inputs.file }}
       run: |
-        # Say "anchored" only when ProofLedger already reported the anchor; a new proof is
-        # usually still PENDING at this point.
-        if [ "$PL_STATUS" = "ANCHORED" ]; then
+        # Say "anchored" only when ProofLedger reported the anchor within the wait.
+        if [ "$PL_STATUS" = "ANCHORED" ] && [ -n "$TX" ]; then
           ANCHOR_LINE="This release artifact's SHA-256 hash was anchored on Polygon via [ProofLedger](https://proofledger.io)."
+          TX_LINE="Polygon transaction: [\`${TX}\`](${EXPLORER}), recorded ${ANCHORED_AT}. Anyone can check it on a block explorer."
         else
           ANCHOR_LINE="This release artifact's SHA-256 hash was submitted to [ProofLedger](https://proofledger.io) at publish time for anchoring on Polygon (the anchor usually lands within a minute)."
+          TX_LINE="Once anchored, the lookup below names the Polygon transaction, which anyone can check on a block explorer such as polygonscan.com."
+        fi
+        if [ -n "$ATTACHED" ]; then
+          FILE_NAME=$(basename "${INPUT_FILE:-<file>}")
+          BUNDLE_LINE="Proof bundle: \`${ATTACHED}\` is attached to this release. Check the file offline, without ProofLedger: \`pip install verify-proof\` then \`verify-proof verify ${FILE_NAME} --proof ${ATTACHED}\`."
+        else
+          BUNDLE_LINE=""
         fi
 
         CURRENT_BODY=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}" --jq '.body')
@@ -193,7 +347,9 @@ runs:
         **Blockchain timestamp.** ${ANCHOR_LINE}
         SHA-256: \`${PL_HASH}\`
         Proof ID: \`${PROOF_ID}\`
-        Look it up: \`curl "${VERIFY_URL}"\` (ProofLedger's public lookup, no account required). Once anchored it names the Polygon transaction, which anyone can check on a block explorer such as polygonscan.com.
+        ${TX_LINE}
+        ${BUNDLE_LINE}
+        Look it up: \`curl "${VERIFY_URL}"\` (ProofLedger's public lookup, no account required).
         BLOCK
         )
 
