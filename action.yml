@@ -340,7 +340,10 @@ runs:
 
         CURRENT_BODY=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}" --jq '.body')
 
+        # Two newlines before the rule: a "---" straight under a line of text turns that
+        # line into a Markdown heading instead of drawing a rule (seen on 2026-10-19).
         PROOF_BLOCK=$(cat <<BLOCK
+
 
         ---
 
