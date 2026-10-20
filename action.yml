@@ -1,4 +1,4 @@
-name: "ProofLedger — Timestamp Release"
+name: "ProofLedger Release Timestamp"
 description: "Anchor a SHA-256 hash of your release artifact on the Polygon blockchain via ProofLedger. Your file never leaves the runner."
 author: "Craig Solomon / Fulcrum Enterprises LLC"
 
