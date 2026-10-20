@@ -1,4 +1,4 @@
-# ProofLedger — Timestamp Release
+# ProofLedger Release Timestamp
 
 Anchor a SHA-256 hash of your release artifact on the **Polygon** blockchain via [ProofLedger](https://proofledger.io).
 
